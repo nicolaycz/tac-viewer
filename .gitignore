@@ -1,0 +1,17 @@
+# Datos médicos y todo lo derivado de ellos: nunca se versionan
+data/
+web/public/data/
+*.dcm
+DICOMDIR
+*.npz
+*.stl
+*.glb
+*.mp4
+
+# Entorno y build
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+web/dist/
+.DS_Store
