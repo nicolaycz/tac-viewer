@@ -2,18 +2,17 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { Enums, EVENTS, setVolumesForViewports, utilities } from '@cornerstonejs/core'
 import type { Types } from '@cornerstonejs/core'
 import type { Types as ToolTypes } from '@cornerstonejs/tools'
-import { CROSSHAIR_COLORS, create2DToolGroup, destroyToolGroup, engine, setPrimaryTool, type PrimaryTool } from '../lib/cornerstone'
-import { formatMm, type Manifest, type PlaneId } from '../lib/manifest'
+import { create2DToolGroup, crosshairColor, destroyToolGroup, engine, setPrimaryTool, type PrimaryTool } from '../lib/cornerstone'
+import { formatMm, type PlaneId, type ViewProps } from '../lib/manifest'
 import { loadFusedVolume, voiFromWindow, type FusedVolume } from '../lib/volume'
+import { registerSyncViewport, type Pane, type SyncKind } from '../lib/sync'
 import { Chips, LoadingMessage, OrientationLabels, Section, ToolButtons } from '../components/ui'
 
-const TOOL_GROUP_ID = 'mpr-tools'
 const PLANES: { id: PlaneId; label: string; orientation: Enums.OrientationAxis; axis: 0 | 1 | 2 }[] = [
   { id: 'axial', label: 'Axial', orientation: Enums.OrientationAxis.AXIAL, axis: 2 },
   { id: 'coronal', label: 'Coronal', orientation: Enums.OrientationAxis.CORONAL, axis: 1 },
   { id: 'sagital', label: 'Sagital', orientation: Enums.OrientationAxis.SAGITTAL, axis: 0 },
 ]
-const viewportId = (p: PlaneId) => `mpr-${p}`
 const AXIS_LABEL = ['x', 'y', 'z']
 
 const TOOLS: { id: PrimaryTool; label: string; key: string }[] = [
@@ -24,7 +23,9 @@ const TOOLS: { id: PrimaryTool; label: string; key: string }[] = [
 ]
 const TOOL_KEYS: Record<string, PrimaryTool> = { c: 'cruz', w: 'ventana', l: 'medir', h: 'hu' }
 
-export function MprView({ manifest }: { manifest: Manifest }) {
+export function MprView({ manifest, pane = 'a', keyboard = true }: ViewProps) {
+  const TOOL_GROUP_ID = `mpr-tools-${pane}`
+  const viewportId = (p: PlaneId) => `mpr-${p}-${pane}`
   const [volume, setVolume] = useState<FusedVolume | null>(null)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -48,12 +49,16 @@ export function MprView({ manifest }: { manifest: Manifest }) {
     if (!volume) return
     const eng = engine()
     const ids = PLANES.map((p) => viewportId(p.id))
-    eng.setViewports(PLANES.map((p) => ({
-      viewportId: viewportId(p.id),
-      type: Enums.ViewportType.ORTHOGRAPHIC,
-      element: elRefs.current[p.id]!,
-      defaultOptions: { orientation: p.orientation, background: [0, 0, 0] as Types.Point3 },
-    })))
+    // enableElement y no setViewports: setViewports reinicia el motor y borraría
+    // los viewports del otro panel al comparar
+    for (const p of PLANES) {
+      eng.enableElement({
+        viewportId: viewportId(p.id),
+        type: Enums.ViewportType.ORTHOGRAPHIC,
+        element: elRefs.current[p.id]!,
+        defaultOptions: { orientation: p.orientation, background: [0, 0, 0] as Types.Point3 },
+      })
+    }
 
     const readPosition = () => {
       const next = {} as Record<PlaneId, number>
@@ -78,6 +83,7 @@ export function MprView({ manifest }: { manifest: Manifest }) {
     groupRef.current = create2DToolGroup(TOOL_GROUP_ID, ids, tool, true)
 
     let cancelled = false
+    let unregisters: (() => void)[] = []
     const { lower, upper } = voiFromWindow(voi.center, voi.width)
     setVolumesForViewports(eng, [{
       volumeId: volume.id,
@@ -90,12 +96,15 @@ export function MprView({ manifest }: { manifest: Manifest }) {
       applyWindow(voi.center, voi.width)
       eng.renderViewports(ids)
       readPosition()
+      // Al comparar, cada plano sigue al mismo plano del otro panel
+      unregisters = PLANES.map((p) => registerSyncViewport(`mpr-${p.id}` as SyncKind, pane as Pane, viewportId(p.id)))
     })
 
     const ro = new ResizeObserver(() => eng.resize(true, true))
     elements.forEach((el) => ro.observe(el))
     return () => {
       cancelled = true
+      unregisters.forEach((u) => u())
       ro.disconnect()
       for (const el of elements) {
         el.removeEventListener(EVENTS.CAMERA_MODIFIED, readPosition)
@@ -113,13 +122,14 @@ export function MprView({ manifest }: { manifest: Manifest }) {
   }, [tool])
 
   useEffect(() => {
+    if (!keyboard) return
     const onKey = (e: KeyboardEvent) => {
       const t = TOOL_KEYS[e.key.toLowerCase()]
       if (t) setTool(t)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [keyboard])
 
   function applyWindow(center: number, width: number) {
     const eng = engine()
@@ -152,7 +162,7 @@ export function MprView({ manifest }: { manifest: Manifest }) {
       <aside className="sidebar">
         <Section title="Volumen reconstruido">
           <p className="note">
-            Cubo de <b>{spacing[0]} mm</b> calculado combinando las tres series de 3 mm (axial, coronal y sagital).
+            Cubo de <b>{spacing[0]} mm</b>. {manifest.volume.method}.
             Puedes recorrerlo milímetro a milímetro en cualquier plano.
           </p>
         </Section>
@@ -196,7 +206,7 @@ export function MprView({ manifest }: { manifest: Manifest }) {
                   <div ref={(el) => { elRefs.current[p.id] = el }} className="viewport-el" />
                   <OrientationLabels plane={p.id} />
                   <div className="overlay tl">
-                    <div className="big"><span className="swatch" style={{ background: CROSSHAIR_COLORS[viewportId(p.id)] }} />{p.label}</div>
+                    <div className="big"><span className="swatch" style={{ background: crosshairColor(p.id) }} />{p.label}</div>
                   </div>
                   <div className="overlay bl num">
                     <div><span className="accent">{formatMm(rel)}</span> / {formatMm(total, 0)}</div>

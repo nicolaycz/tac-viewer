@@ -6,8 +6,9 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import { Enums, setVolumesForViewports } from '@cornerstonejs/core'
 import type { Types } from '@cornerstonejs/core'
 import { create3DToolGroup, destroyToolGroup, engine } from '../lib/cornerstone'
-import { dataUrl, type Manifest } from '../lib/manifest'
+import { dataUrl, type Manifest, type ViewProps } from '../lib/manifest'
 import { loadFusedVolume, type FusedVolume } from '../lib/volume'
+import { mapPoint, publish, registerSyncViewport, subscribe, type Pane } from '../lib/sync'
 import { Chips, LoadingMessage, Section } from '../components/ui'
 import { AIR_COLOR, Air, Lights, Skull, type Cut } from '../three/skullScene'
 
@@ -38,6 +39,26 @@ const CUTS: { id: Cut; label: string }[] = [
   { id: 'coronal', label: 'Coronal' },
   { id: 'axial', label: 'Axial' },
 ]
+// Eje de la escena que recorre cada plano de corte (ver skullScene.tsx)
+const CUT_AXIS: Record<Exclude<Cut, 'ninguno'>, 0 | 1 | 2> = { sagital: 0, axial: 1, coronal: 2 }
+
+type P3 = [number, number, number]
+/** Escena Three.js (x, z, −y respecto del centro) ↔ coordenadas del estudio en mm (LPS). */
+const sceneToLps = ([x, y, z]: P3, c: P3): P3 => [x + c[0], c[1] - z, y + c[2]]
+const lpsToScene = ([x, y, z]: P3, c: P3): P3 => [x - c[0], z - c[2], c[1] - y]
+
+/** Estado de los controles que se copia al otro panel al comparar */
+interface SkullUi {
+  mode: Mode
+  cut: Cut
+  /** Un punto del plano de corte en mm del estudio, para traducirlo al otro */
+  cutLps: P3 | null
+  showAir: boolean
+  boneOpacity: number
+  preset: string
+  autoRotate: boolean
+}
+
 const VOLUME_PRESETS = [
   { id: 'CT-Bone', label: 'Hueso' },
   { id: 'CT-Bones', label: 'Hueso (opaco)' },
@@ -45,7 +66,7 @@ const VOLUME_PRESETS = [
   { id: 'CT-MIP', label: 'MIP' },
 ]
 
-export function SkullView({ manifest }: { manifest: Manifest }) {
+export function SkullView({ manifest, pane = 'a' }: ViewProps) {
   const [mode, setMode] = useState<Mode>('superficie')
   const [view, setView] = useState<{ id: View; nonce: number }>({ id: 'frente', nonce: 0 })
   const [cut, setCut] = useState<Cut>('ninguno')
@@ -72,10 +93,36 @@ export function SkullView({ manifest }: { manifest: Manifest }) {
     setCutPos(0)
   }
 
+  // Al comparar sincronizados: el panel que manda publica sus controles y el otro los copia
+  const center = mesh.centerLps
+  useEffect(() => {
+    const cutLps = center && cut !== 'ninguno'
+      ? sceneToLps(CUT_AXIS[cut] === 0 ? [cutPos, 0, 0] : CUT_AXIS[cut] === 1 ? [0, cutPos, 0] : [0, 0, cutPos], center)
+      : null
+    publish('skull-ui', pane as Pane, { mode, cut, cutLps, showAir, boneOpacity, preset, autoRotate } satisfies SkullUi)
+  }, [pane, center, mode, cut, cutPos, showAir, boneOpacity, preset, autoRotate])
+
+  useEffect(() => subscribe(pane as Pane, (topic, from, payload) => {
+    if (topic !== 'skull-ui') return
+    const ui = payload as SkullUi
+    setMode(ui.mode)
+    setCut(ui.cut)
+    setShowAir(ui.showAir)
+    setBoneOpacity(ui.boneOpacity)
+    setPreset(ui.preset)
+    setAutoRotate(ui.autoRotate)
+    if (ui.cut !== 'ninguno' && ui.cutLps && center) {
+      // El mismo plano anatómico, expresado en la escena de este estudio
+      const pos = lpsToScene(mapPoint(from, ui.cutLps), center)[CUT_AXIS[ui.cut]]
+      const half = halfExtent[ui.cut]
+      setCutPos(Math.max(-half, Math.min(half, Math.round(pos * 2) / 2)))
+    }
+  }), [pane, center, halfExtent])
+
   const screenshot = () => {
     const canvas = canvasRef.current
     if (!canvas) return
-    canvas.toBlob((blob) => blob && download(blob, 'craneo.png'))
+    canvas.toBlob((blob) => blob && download(blob, `craneo-${manifest.studyId}.png`))
   }
 
   return (
@@ -155,7 +202,7 @@ export function SkullView({ manifest }: { manifest: Manifest }) {
                   {recording ? 'Grabando…' : 'Grabar video 360°'}
                 </button>
                 <button className="btn" onClick={screenshot}>Captura PNG</button>
-                <a className="btn" href={dataUrl(mesh.stl)} download="craneo.stl">Descargar STL (impresión 3D)</a>
+                <a className="btn" href={dataUrl(mesh.stl)} download={`craneo-${manifest.studyId}.stl`}>Descargar STL (impresión 3D)</a>
               </div>
             </Section>
             <Section title="Malla">
@@ -198,7 +245,7 @@ export function SkullView({ manifest }: { manifest: Manifest }) {
           >
             <Lights />
             <Suspense fallback={null}>
-              <Turntable recording={recording} onDone={() => setRecording(false)}>
+              <Turntable recording={recording} fileName={`craneo-360-${manifest.studyId}`} onDone={() => setRecording(false)}>
                 <Skull url={dataUrl(mesh.glb)} cut={cut} cutPos={cutPos} opacity={boneOpacity} />
                 {mesh.air && showAir && (
                   <Suspense fallback={null}>
@@ -209,10 +256,11 @@ export function SkullView({ manifest }: { manifest: Manifest }) {
             </Suspense>
             <CameraRig view={view} />
             <OrbitControls makeDefault enableDamping autoRotate={autoRotate && !recording} autoRotateSpeed={1.5} />
+            {center && <SurfaceCameraSync pane={pane as Pane} center={center} />}
           </Canvas>
         </div>
       ) : (
-        <VolumeRender manifest={manifest} preset={preset} />
+        <VolumeRender manifest={manifest} preset={preset} pane={pane} />
       )}
     </div>
   )
@@ -234,8 +282,37 @@ function CameraRig({ view }: { view: { id: View; nonce: number } }) {
   return null
 }
 
+/**
+ * Cámara de la superficie al comparar: la del panel que manda, llevada al otro
+ * estudio con la alineación (el mismo punto anatómico al centro, desde el mismo lado).
+ */
+function SurfaceCameraSync({ pane, center }: { pane: Pane; center: P3 }) {
+  const { camera, controls } = useThree()
+  useEffect(() => {
+    const c = controls as OrbitControlsImpl | null
+    if (!c) return
+    const onChange = () => publish('skull-camera', pane, {
+      position: sceneToLps(camera.position.toArray() as P3, center),
+      target: sceneToLps(c.target.toArray() as P3, center),
+    })
+    c.addEventListener('change', onChange)
+    const unsubscribe = subscribe(pane, (topic, from, payload) => {
+      if (topic !== 'skull-camera') return
+      const { position, target } = payload as { position: P3; target: P3 }
+      camera.position.set(...lpsToScene(mapPoint(from, position), center))
+      c.target.set(...lpsToScene(mapPoint(from, target), center))
+      c.update()
+    })
+    return () => {
+      c.removeEventListener('change', onChange)
+      unsubscribe()
+    }
+  }, [camera, controls, pane, center])
+  return null
+}
+
 /** Gira el modelo 360° mientras graba el canvas a video. */
-function Turntable({ recording, onDone, children }: { recording: boolean; onDone: () => void; children: React.ReactNode }) {
+function Turntable({ recording, fileName, onDone, children }: { recording: boolean; fileName: string; onDone: () => void; children: React.ReactNode }) {
   const group = useRef<THREE.Group>(null)
   const gl = useThree((s) => s.gl)
   const state = useRef<{ start: number; recorder: MediaRecorder } | null>(null)
@@ -254,7 +331,7 @@ function Turntable({ recording, onDone, children }: { recording: boolean; onDone
     }
     recorder.onstop = () => {
       const ext = type?.startsWith('video/mp4') ? 'mp4' : 'webm'
-      download(new Blob(chunks, { type: recorder.mimeType }), `craneo-360.${ext}`)
+      download(new Blob(chunks, { type: recorder.mimeType }), `${fileName}.${ext}`)
       onDoneRef.current()
     }
     recorder.start()
@@ -294,10 +371,9 @@ function download(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(url), 2000)
 }
 
-const VR_VIEWPORT_ID = 'vr'
-const VR_TOOL_GROUP_ID = 'vr-tools'
-
-function VolumeRender({ manifest, preset }: { manifest: Manifest; preset: string }) {
+function VolumeRender({ manifest, preset, pane }: { manifest: Manifest; preset: string; pane: string }) {
+  const VR_VIEWPORT_ID = `vr-${pane}`
+  const VR_TOOL_GROUP_ID = `vr-tools-${pane}`
   const [volume, setVolume] = useState<FusedVolume | null>(null)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -319,6 +395,7 @@ function VolumeRender({ manifest, preset }: { manifest: Manifest; preset: string
     })
     create3DToolGroup(VR_TOOL_GROUP_ID, [VR_VIEWPORT_ID])
     let cancelled = false
+    let unregister: (() => void) | undefined
     setVolumesForViewports(eng, [{ volumeId: volume.id }], [VR_VIEWPORT_ID]).then(() => {
       if (cancelled) return
       const vp = eng.getViewport(VR_VIEWPORT_ID) as Types.IVolumeViewport
@@ -326,11 +403,13 @@ function VolumeRender({ manifest, preset }: { manifest: Manifest; preset: string
       vp.resetCamera()
       vp.render()
       setReady(true)
+      unregister = registerSyncViewport('vr', pane as Pane, VR_VIEWPORT_ID)
     })
     const ro = new ResizeObserver(() => eng.resize(true, true))
     ro.observe(elRef.current)
     return () => {
       cancelled = true
+      unregister?.()
       ro.disconnect()
       destroyToolGroup(VR_TOOL_GROUP_ID)
       eng.disableElement(VR_VIEWPORT_ID)

@@ -1,7 +1,9 @@
 """Arma el MP4 del giro 360° a partir de los cuadros que graba web/scripts/render-360.mjs.
 
 Uso:
-    .venv/bin/python pipeline/turntable.py --frames data/export/frames-360 --out web/public/data
+    .venv/bin/python pipeline/turntable.py --estudio 2025-03-14
+
+Sin --estudio usa el más reciente de web/public/data/studies.json.
 """
 from __future__ import annotations
 
@@ -52,10 +54,23 @@ def draw_overlay(img: Image.Image, title: str, subtitle: str, show_air: bool):
         y -= int(small.size * 1.6)
 
 
+def study_dir(study_id: str | None) -> Path:
+    data = Path("web/public/data")
+    index = data / "studies.json"
+    if not index.exists():
+        return data  # formato antiguo: un solo estudio en data/
+    entries = json.loads(index.read_text())
+    entry = next((e for e in entries if e["id"] == study_id), None) if study_id else entries[0]
+    if entry is None:
+        sys.exit(f"No hay un estudio {study_id!r} en {index}. Opciones: {[e['id'] for e in entries]}")
+    return data / entry["path"]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", type=Path, default=Path("data/export/frames-360"))
-    ap.add_argument("--out", type=Path, default=Path("web/public/data"))
+    ap.add_argument("--estudio", help="id del estudio en web/public/data/studies.json (por defecto, el más reciente)")
+    ap.add_argument("--out", type=Path, help="carpeta del estudio; por defecto la de --estudio")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--name", default="craneo-360.mp4")
     ap.add_argument("--sin-aire", action="store_true", help="el video no incluye la capa de aire")
@@ -65,7 +80,8 @@ def main():
     files = sorted(args.frames.glob("*.png"))
     if not files:
         sys.exit(f"No hay cuadros en {args.frames}. Corre primero web/scripts/render-360.mjs")
-    manifest_path = args.out / "manifest.json"
+    out = args.out or study_dir(args.estudio)
+    manifest_path = out / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     study = manifest["study"]
     d = date.fromisoformat(study["date"]) if study.get("date") else None
@@ -75,7 +91,7 @@ def main():
 
     size = Image.open(files[0]).size[0]
     background = radial_background(size)
-    path = args.out / "video" / args.name
+    path = out / "video" / args.name
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = imageio.get_writer(path, fps=args.fps, codec="libx264", quality=9,
                                 pixelformat="yuv420p", macro_block_size=2)

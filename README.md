@@ -15,21 +15,25 @@ Todo corre en tu computador. Los estudios no se suben a ningún lado.
 | **Cráneo 3D** | *Superficie*: malla del hueso con vistas, plano de corte, capa de senos y vía aérea, video 360°, PNG y STL para imprimir. *Volumen*: render directo de los vóxeles (hueso, piel, MIP). |
 | **Videos** | MP4 de cada serie y recorridos cada 1 mm del volumen reconstruido. |
 
+Si tienes varios TAC (por ejemplo, uno por año), el menú **Estudio** de la barra superior cambia entre ellos y **Comparar** los abre lado a lado en la misma pestaña. Con **Sincronizar** (activo por defecto) los dos paneles se mueven juntos: lo que hagas en el panel donde está el mouse se repite en el otro, en el mismo lugar anatómico. En *Cortes*: corte, zoom, desplazamiento, ventana y plano de la serie. En *Cada milímetro*: los tres planos, la cruz, el zoom y la ventana; el segundo estudio se re-corta en oblicuo para mostrar exactamente el mismo plano. En *Cráneo 3D*: la cámara, el modo, el plano de corte, la capa de senos y la opacidad. La URL guarda la vista (`?estudio=2025-03-14&comparar=2023-06-02#mpr`), así que recargar o guardar el enlace la conserva.
+
+Para que los cortes coincidan, cada par de estudios se alinea con una transformación rígida (rotación + traslación) calculada sobre la superficie del hueso, que no cambia entre años ([`pipeline/register.py`](pipeline/register.py)). El botón muestra el error típico de esa alineación (por ejemplo, ± 1 mm). `build.py` alinea solo cada estudio nuevo con los anteriores; para recalcular: `.venv/bin/python pipeline/register.py --force`.
+
 ## Uso
 
 Necesitas Python 3.11+, Node 20.19+ y, para el video 360°, Google Chrome.
 
-**1. Copia el estudio.** Pon la carpeta del CD (la que tiene `DICOMDIR`, o cualquier carpeta con los archivos DICOM) en `data/raw/`. El pipeline busca recursivamente y descarta lo que no sea imagen CT.
+**1. Copia el estudio.** Pon la carpeta del CD (la que tiene `DICOMDIR`, o cualquier carpeta con los archivos DICOM) en su propia carpeta dentro de `data/raw/`, por ejemplo `data/raw/2025-03-14/`. Un estudio por carpeta: si el pipeline encuentra dos estudios mezclados, se detiene y te avisa. Busca recursivamente y descarta lo que no sea imagen CT.
 
 **2. Procésalo:**
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r pipeline/requirements.txt
-.venv/bin/python pipeline/build.py
+.venv/bin/python pipeline/build.py --raw data/raw/2025-03-14
 ```
 
-Tarda uno o dos minutos y escribe todo en `web/public/data/`. Opciones: `--threshold 250` (umbral óseo de la malla, en HU), `--spacing 0.5` (vóxel en mm), `--refuse` (recalcular la reconstrucción en vez de usar la caché) y `--skip-videos`.
+Tarda uno o dos minutos, escribe todo en `web/public/data/studies/<fecha>/` y agrega el estudio al menú (`web/public/data/studies.json`). Repite el paso con cada estudio que quieras ver o comparar. `--study-id` cambia el nombre de la carpeta (por defecto, la fecha del estudio). Opciones: `--threshold 250` (umbral óseo de la malla, en HU), `--spacing 0.5` (vóxel en mm), `--refuse` (recalcular la reconstrucción en vez de usar la caché) y `--skip-videos`.
 
 **3. Abre el visor:**
 
@@ -46,6 +50,8 @@ y entra a http://localhost:5173.
 ```bash
 cd web && npm run video:360
 ```
+
+Eso graba el estudio más reciente. Para otro, corre los dos pasos por separado con `--estudio`: `node scripts/render-360.mjs --estudio 2023-06-02` y `../.venv/bin/python ../pipeline/turntable.py --estudio 2023-06-02`.
 
 Graba cada cuadro con Chrome headless, así que el video no depende de la fluidez del navegador. Para cambiar opciones, corre los dos pasos por separado desde `web/`: `node scripts/render-360.mjs --hueso 0.4 --aire 0 --size 1080 --url http://localhost:5173` (opacidad del hueso, sin capa de senos, tamaño, servidor) y luego `../.venv/bin/python ../pipeline/turntable.py` (con `--sin-aire` si quitaste los senos).
 

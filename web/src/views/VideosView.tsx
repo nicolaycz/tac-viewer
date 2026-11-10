@@ -1,4 +1,4 @@
-import { dataUrl, type Manifest, type PlaneId } from '../lib/manifest'
+import { dataUrl, type PlaneId, type ViewProps } from '../lib/manifest'
 
 const FUSED_PLANES: { id: PlaneId; label: string; direction: string }[] = [
   { id: 'axial', label: 'Axial', direction: 'de inferior a superior' },
@@ -12,7 +12,7 @@ interface Clip {
   url: string
 }
 
-export function VideosView({ manifest }: { manifest: Manifest }) {
+export function VideosView({ manifest }: ViewProps) {
   const original: Clip[] = manifest.series
     .filter((s) => s.video)
     .map((s) => ({

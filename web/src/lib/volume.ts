@@ -2,9 +2,18 @@ import { cache, metaData, volumeLoader, utilities } from '@cornerstonejs/core'
 import type { Types } from '@cornerstonejs/core'
 import { dataUrl, type VolumeEntry } from './manifest'
 
-// Sin ":" a propósito: así Cornerstone no intenta cargar sus cortes con un loader por esquema
-export const FUSED_VOLUME_ID = 'tac-fused'
-const FRAME_OF_REFERENCE = 'tac-fused-frame'
+/**
+ * Un volumen por estudio. Sin ":" a propósito: así Cornerstone no intenta cargar
+ * sus cortes con un loader por esquema. El marco de referencia también es propio
+ * de cada estudio, para que las mediciones de uno no aparezcan en el otro.
+ */
+function volumeIds(entry: VolumeEntry) {
+  const key = entry.url.replace(/[^a-zA-Z0-9]+/g, '-')
+  return { id: `tac-fused-${key}`, frame: `tac-frame-${key}` }
+}
+
+/** Volúmenes descargados en memoria; con dos alcanza para comparar sin acumular estudios. */
+const MAX_CACHED = 2
 
 export interface FusedVolume {
   id: string
@@ -14,7 +23,7 @@ export interface FusedVolume {
   huAt(world: Types.Point3): number | null
 }
 
-let downloading: Promise<FusedVolume> | null = null
+const downloads = new Map<string, Promise<FusedVolume>>()
 
 async function fetchBytes(url: string, onProgress: (f: number) => void): Promise<Uint8Array> {
   const res = await fetch(url)
@@ -51,7 +60,29 @@ async function gunzipIfNeeded(bytes: Uint8Array): Promise<ArrayBuffer> {
  * Cornerstone cada vez que una vista lo pide (el caché se puede vaciar).
  */
 export async function loadFusedVolume(entry: VolumeEntry, onProgress: (f: number) => void = () => {}): Promise<FusedVolume> {
-  downloading ??= (async () => {
+  const { id } = volumeIds(entry)
+  let downloading = downloads.get(id)
+  if (downloading) {
+    // Al final de la lista = usado más recientemente
+    downloads.delete(id)
+    downloads.set(id, downloading)
+  } else {
+    downloading = downloadVolume(entry, id, onProgress)
+    downloads.set(id, downloading)
+    downloading.catch(() => downloads.delete(id))
+    while (downloads.size > MAX_CACHED) {
+      const oldest = downloads.keys().next().value!
+      downloads.delete(oldest)
+      cache.removeVolumeLoadObject(oldest)
+    }
+  }
+  const fused = await downloading
+  ensureCornerstoneVolume(fused)
+  return fused
+}
+
+function downloadVolume(entry: VolumeEntry, id: string, onProgress: (f: number) => void): Promise<FusedVolume> {
+  return (async () => {
     const bytes = await fetchBytes(dataUrl(entry.url), onProgress)
     const data = new Int16Array(await gunzipIfNeeded(bytes))
     const [nx, ny, nz] = entry.dimensions
@@ -59,7 +90,7 @@ export async function loadFusedVolume(entry: VolumeEntry, onProgress: (f: number
     const [ox, oy, oz] = entry.origin
     const [sx, sy, sz] = entry.spacing
     return {
-      id: FUSED_VOLUME_ID,
+      id,
       entry,
       data,
       huAt([x, y, z]) {
@@ -71,18 +102,13 @@ export async function loadFusedVolume(entry: VolumeEntry, onProgress: (f: number
       },
     }
   })()
-  downloading.catch(() => {
-    downloading = null
-  })
-  const fused = await downloading
-  ensureCornerstoneVolume(fused)
-  return fused
 }
 
-function ensureCornerstoneVolume({ entry, data }: FusedVolume) {
-  if (cache.getVolume(FUSED_VOLUME_ID)) return
+function ensureCornerstoneVolume({ id, entry, data }: FusedVolume) {
+  if (cache.getVolume(id)) return
+  const { frame } = volumeIds(entry)
   const [nx, ny] = entry.dimensions
-  volumeLoader.createLocalVolume(FUSED_VOLUME_ID, {
+  volumeLoader.createLocalVolume(id, {
     scalarData: data,
     dimensions: entry.dimensions as Types.Point3,
     spacing: entry.spacing as Types.Point3,
@@ -96,8 +122,8 @@ function ensureCornerstoneVolume({ entry, data }: FusedVolume) {
       PhotometricInterpretation: 'MONOCHROME2',
       PixelRepresentation: 1,
       Modality: 'CT',
-      SeriesInstanceUID: FUSED_VOLUME_ID,
-      FrameOfReferenceUID: FRAME_OF_REFERENCE,
+      SeriesInstanceUID: id,
+      FrameOfReferenceUID: frame,
       ImageOrientationPatient: [1, 0, 0, 0, 1, 0],
       PixelSpacing: [entry.spacing[1], entry.spacing[0]],
       Columns: nx,
@@ -111,13 +137,13 @@ function ensureCornerstoneVolume({ entry, data }: FusedVolume) {
   // la posición de cada uno para que las herramientas encuentren el corte correcto.
   const [ox, oy, oz] = entry.origin
   const sz = entry.spacing[2]
-  cache.getVolume(FUSED_VOLUME_ID)!.imageIds.forEach((imageId, k) => {
+  cache.getVolume(id)!.imageIds.forEach((imageId, k) => {
     const plane = metaData.get('imagePlaneModule', imageId) ?? {}
     utilities.genericMetadataProvider.add(imageId, {
       type: 'imagePlaneModule',
       metadata: {
         ...plane,
-        frameOfReferenceUID: FRAME_OF_REFERENCE,
+        frameOfReferenceUID: frame,
         imagePositionPatient: [ox, oy, oz + k * sz],
         sliceLocation: oz + k * sz,
         sliceThickness: sz,

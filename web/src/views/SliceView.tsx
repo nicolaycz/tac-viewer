@@ -3,12 +3,12 @@ import { Enums, EVENTS, imageLoader, utilities } from '@cornerstonejs/core'
 import type { Types } from '@cornerstonejs/core'
 import type { Types as ToolTypes } from '@cornerstonejs/tools'
 import { create2DToolGroup, destroyToolGroup, engine, setPrimaryTool, type PrimaryTool } from '../lib/cornerstone'
-import { dataUrl, formatMm, relativeMm, type Manifest } from '../lib/manifest'
+import { dataUrl, formatMm, relativeMm, type ViewProps } from '../lib/manifest'
 import { voiFromWindow } from '../lib/volume'
+import { publish, registerSyncViewport, subscribe, type Pane } from '../lib/sync'
 import { Chips, OrientationLabels, PlayIcon, Section, ToolButtons } from '../components/ui'
 
-const VIEWPORT_ID = 'stack'
-const TOOL_GROUP_ID = 'stack-tools'
+const AXIS_INDEX = { x: 0, y: 1, z: 2 } as const
 
 const TOOLS: { id: PrimaryTool; label: string; key: string }[] = [
   { id: 'ventana', label: 'Ventana', key: 'W' },
@@ -19,7 +19,9 @@ const TOOLS: { id: PrimaryTool; label: string; key: string }[] = [
 ]
 const TOOL_KEYS: Record<string, PrimaryTool> = { w: 'ventana', m: 'mover', z: 'zoom', l: 'medir', h: 'hu' }
 
-export function SliceView({ manifest }: { manifest: Manifest }) {
+export function SliceView({ manifest, pane = 'a', keyboard = true }: ViewProps) {
+  const VIEWPORT_ID = `stack-${pane}`
+  const TOOL_GROUP_ID = `stack-tools-${pane}`
   const [seriesId, setSeriesId] = useState(manifest.series[0].id)
   const series = manifest.series.find((s) => s.id === seriesId) ?? manifest.series[0]
   const [index, setIndex] = useState(0)
@@ -77,16 +79,23 @@ export function SliceView({ manifest }: { manifest: Manifest }) {
     setPlaying(false)
     const imageIds = series.files.map((f) => `wadouri:${new URL(dataUrl(f), location.href).href}`)
     const start = Math.floor(imageIds.length / 2)
+    let unregister: (() => void) | undefined
     vp.setStack(imageIds, start).then(() => {
       if (cancelled) return
       vp.setProperties({ voiRange: voiFromWindow(voi.center, voi.width) })
       vp.render()
       setIndex(start)
+      // Al comparar, el otro panel sigue a este corte (y viceversa)
+      unregister = registerSyncViewport('stack', pane as Pane, VIEWPORT_ID, {
+        positions: series.positionsMm,
+        axis: AXIS_INDEX[series.axis],
+      })
     })
     // Precarga para que la reproducción sea fluida
     for (const id of imageIds) imageLoader.loadAndCacheImage(id).catch(() => {})
     return () => {
       cancelled = true
+      unregister?.()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [series])
@@ -94,6 +103,19 @@ export function SliceView({ manifest }: { manifest: Manifest }) {
   useEffect(() => {
     if (groupRef.current) setPrimaryTool(groupRef.current, tool)
   }, [tool])
+
+  // Al comparar sincronizados, el otro panel pasa a su serie del mismo plano
+  useEffect(() => {
+    publish('stack-plane', pane as Pane, series.plane)
+  }, [pane, series.plane])
+  useEffect(() => subscribe(pane as Pane, (topic, _from, plane) => {
+    if (topic !== 'stack-plane') return
+    setSeriesId((current) => {
+      const cur = manifest.series.find((s) => s.id === current)
+      if (cur?.plane === plane) return current
+      return manifest.series.find((s) => s.plane === plane)?.id ?? current
+    })
+  }), [pane, manifest])
 
   // Reproducción tipo cine
   useEffect(() => {
@@ -121,6 +143,7 @@ export function SliceView({ manifest }: { manifest: Manifest }) {
   }
 
   useEffect(() => {
+    if (!keyboard) return
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return
       const vp = vpRef.current
@@ -137,7 +160,7 @@ export function SliceView({ manifest }: { manifest: Manifest }) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [goTo, series])
+  }, [goTo, series, keyboard])
 
   const onMouseMove = (e: React.MouseEvent) => {
     const vp = vpRef.current
@@ -167,6 +190,7 @@ export function SliceView({ manifest }: { manifest: Manifest }) {
             {manifest.series.map((s) => (
               <button key={s.id} className="series-item" aria-pressed={s.id === seriesId} onClick={() => setSeriesId(s.id)}>
                 <b>{s.label}</b>
+                {s.description && <small>{s.description}</small>}
                 <small>{s.count} cortes · {s.thicknessMm} mm · {s.direction}</small>
               </button>
             ))}

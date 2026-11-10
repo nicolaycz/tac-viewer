@@ -1,8 +1,9 @@
 // Graba el giro de 360° del cráneo cuadro a cuadro con Chrome headless.
 //
 // Requiere el servidor de desarrollo corriendo (npm run dev). Uso:
-//   node scripts/render-360.mjs --url http://localhost:5173 --frames 360 --size 1080
-// Después: ../.venv/bin/python ../pipeline/turntable.py  (arma el MP4)
+//   node scripts/render-360.mjs --estudio 2025-03-14 --url http://localhost:5173 --frames 360 --size 1080
+// Después: ../.venv/bin/python ../pipeline/turntable.py --estudio 2025-03-14  (arma el MP4)
+// Sin --estudio se usa el más reciente de data/studies.json.
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -23,6 +24,7 @@ const query = new URLSearchParams({
   hueso: args.hueso ?? '0.3',
   aire: args.aire ?? '1',
   elevacion: args.elevacion ?? '12',
+  ...(args.estudio ? { estudio: args.estudio } : {}),
 })
 
 const CHROME_PATHS = [

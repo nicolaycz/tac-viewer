@@ -16,7 +16,7 @@ import {
 } from '@cornerstonejs/tools'
 import type { Types as ToolTypes } from '@cornerstonejs/tools'
 
-const ENGINE_ID = 'tac-engine'
+export const ENGINE_ID = 'tac-engine'
 let ready: Promise<void> | null = null
 
 export function initCornerstone(): Promise<void> {
@@ -85,7 +85,7 @@ export function create2DToolGroup(id: string, viewportIds: string[], primary: Pr
   group.addTool(ProbeTool.toolName)
   if (withCrosshairs) {
     group.addTool(CrosshairsTool.toolName, {
-      getReferenceLineColor: (viewportId: string) => CROSSHAIR_COLORS[viewportId] ?? '#f5b942',
+      getReferenceLineColor: (viewportId: string) => crosshairColor(viewportId),
       getReferenceLineControllable: () => true,
       getReferenceLineDraggableRotatable: () => false,
       getReferenceLineSlabThicknessControlsOn: () => false,
@@ -98,10 +98,16 @@ export function create2DToolGroup(id: string, viewportIds: string[], primary: Pr
   return group
 }
 
-export const CROSSHAIR_COLORS: Record<string, string> = {
-  'mpr-axial': '#ef6b5b',
-  'mpr-coronal': '#5fbf7f',
-  'mpr-sagital': '#5b9cef',
+const CROSSHAIR_COLORS: Record<string, string> = {
+  axial: '#ef6b5b',
+  coronal: '#5fbf7f',
+  sagital: '#5b9cef',
+}
+
+/** Color de la cruz según el plano; los ids de viewport son "mpr-<plano>-<panel>". */
+export function crosshairColor(viewportIdOrPlane: string): string {
+  const plane = Object.keys(CROSSHAIR_COLORS).find((p) => viewportIdOrPlane === p || viewportIdOrPlane.startsWith(`mpr-${p}`))
+  return plane ? CROSSHAIR_COLORS[plane] : '#f5b942'
 }
 
 export function setPrimaryTool(group: ToolTypes.IToolGroup, primary: PrimaryTool) {

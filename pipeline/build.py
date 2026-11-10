@@ -1,7 +1,7 @@
 """Genera todo lo que consume el visor web a partir del CD del TAC.
 
-Uso:
-    .venv/bin/python pipeline/build.py --raw data/raw --out web/public/data
+Uso (un estudio por carpeta; se publica en web/public/data/studies/<fecha>/):
+    .venv/bin/python pipeline/build.py --raw data/raw/2025-03-14
 """
 from __future__ import annotations
 
@@ -67,8 +67,12 @@ def comparison_image(fused: np.ndarray, naive: np.ndarray, path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--raw", type=Path, default=Path("data/raw"))
-    ap.add_argument("--out", type=Path, default=Path("web/public/data"))
+    ap.add_argument("--raw", type=Path, default=Path("data/raw"),
+                    help="carpeta con los DICOM de UN estudio (p. ej. data/raw/2025-03-14)")
+    ap.add_argument("--studies", type=Path, default=Path("web/public/data/studies"),
+                    help="cada estudio se escribe en <studies>/<id>/ y se registra en ../studies.json")
+    ap.add_argument("--study-id", help="nombre de la carpeta del estudio (por defecto, su fecha AAAA-MM-DD)")
+    ap.add_argument("--out", type=Path, help="carpeta de salida explícita; no se registra en el índice")
     ap.add_argument("--cache", type=Path, default=Path("data/cache"))
     ap.add_argument("--spacing", type=float, default=0.5, help="vóxel isotrópico en mm")
     ap.add_argument("--iterations", type=int, default=20)
@@ -78,14 +82,21 @@ def main():
     ap.add_argument("--skip-videos", action="store_true", help="reusar los videos ya generados")
     args = ap.parse_args()
 
-    out, cache = args.out, args.cache
-    out.mkdir(parents=True, exist_ok=True)
+    cache = args.cache
     cache.mkdir(parents=True, exist_ok=True)
 
     log("1/5  Leyendo y ordenando series…")
     series = discover_series(args.raw)
     if not series:
         sys.exit(f"No encontré series CT en {args.raw}")
+    # Dos CD en la misma carpeta mezclarían cortes de fechas distintas en un solo volumen
+    by_study: dict[str, str] = {}
+    for s in series:
+        h = s.headers[0]
+        by_study.setdefault(str(h.get("StudyInstanceUID", "")), str(h.get("StudyDate", "")))
+    if len(by_study) > 1:
+        sys.exit(f"{args.raw} tiene {len(by_study)} estudios distintos (fechas {', '.join(sorted(by_study.values()))}). "
+                 "Pon cada uno en su propia carpeta y procésalos por separado con --raw.")
     first = series[0].headers[0]
     study = {
         "description": str(first.get("StudyDescription", "")).replace("^", " ").strip(),
@@ -93,6 +104,10 @@ def main():
         "manufacturer": " ".join(str(first.get(k, "")) for k in ("Manufacturer", "ManufacturerModelName")).strip(),
         "kernel": str(first.get("ConvolutionKernel", [""])[0]) if first.get("ConvolutionKernel") else "",
     }
+    study_id = args.study_id or study["date"] or "estudio"
+    out = args.out or args.studies / study_id
+    out.mkdir(parents=True, exist_ok=True)
+    log(f"  estudio {study_id} → {out}")
     manifest_series = []
     volumes = []
     per_plane: dict[str, int] = {}
@@ -183,7 +198,9 @@ def main():
     air_info = export_meshes(air_verts, air_faces, center, mesh_dir / "aire.glb", mesh_dir / "aire.stl",
                              color=[110, 180, 235, 255])
     log(f"  aire: {air_info['faces']:,} caras")
+    # centerLps: origen de la escena 3D en coordenadas del estudio (para sincronizar al comparar)
     mesh = {"glb": "mesh/craneo.glb", "stl": "mesh/craneo.stl", "thresholdHU": args.threshold, **mesh_info,
+            "centerLps": [round(float(c), 3) for c in center],
             "air": {"glb": "mesh/aire.glb", "stl": "mesh/aire.stl", "thresholdHU": -400, **air_info}}
 
     log("4/5  Videos…")
@@ -222,7 +239,29 @@ def main():
         **({"turntable": turntable} if turntable else {}),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1))
+    if not args.out:
+        register_study(args.studies, study_id, study)
+        # Con dos o más estudios, se alinean entre sí para poder compararlos corte a corte
+        from register import register_all
+        register_all(args.studies.parent)
     log(f"Listo → {out}")
+
+
+def register_study(studies_dir: Path, study_id: str, study: dict):
+    """Agrega o actualiza el estudio en studies.json, el menú de estudios del visor."""
+    index_path = studies_dir.parent / "studies.json"
+    entries = json.loads(index_path.read_text()) if index_path.exists() else []
+    entries = [e for e in entries if e["id"] != study_id]
+    entries.append({
+        "id": study_id,
+        "date": study["date"],
+        "description": study["description"],
+        "manufacturer": study["manufacturer"],
+        "path": f"{studies_dir.name}/{study_id}/",
+    })
+    entries.sort(key=lambda e: e["date"] or e["id"], reverse=True)
+    index_path.write_text(json.dumps(entries, ensure_ascii=False, indent=1))
+    log(f"  registrado en {index_path} ({len(entries)} estudios)")
 
 
 if __name__ == "__main__":
